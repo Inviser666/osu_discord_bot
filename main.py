@@ -1,26 +1,29 @@
+from typing import assert_type
+
 from scoreToImg import makeScoreImage
 import discord
 from discord.ext import commands
 from config import settings
 import asyncio
-import time
-from ossapi import Ossapi
-from ossapi import mod
+import ossapi
+from ossapi import mod, Ossapi
+from ossapi.enums import Grade
 import os
 import asyncio
-from ossapi import OssapiAsync
 import requests
 from numpy import round
-import sys
+from array import array
+import random
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix = settings['prefix'],intents = intents)
+bot.status = discord.Status.do_not_disturb
 
 #List of processing users
 user_list = []
 #List of processing channels
-channel_list = []
+channel_list = array('i')
 #Костылище ебаное
 isResumed = False
 #Osu keys
@@ -47,10 +50,9 @@ def addNewUser(userID):
     return True
 
 def initUsers():
-    user_list.clear()
+    del user_list[:]
     file = open("playersid.txt", "r")
     while (True):
-        line : str
         line = file.readline()
         print(line)
         if not line:
@@ -59,15 +61,14 @@ def initUsers():
     file.close()
 
 def initChannels():
-    channel_list.clear()
+    del channel_list[:]
     file = open("channels.txt", "r")
     while (True):
-        line : str
         line = file.readline()
         print(line)
         if not line:
             break
-        channel_list.append(int(line.strip("\n")))
+        channel_list.append(int(line.rstrip()))
     file.close()
 
 def init():
@@ -85,8 +86,8 @@ def addToFile(newUserID):
     file.write(str(newUserID) + "\n")
     file.close()
 
-@bot.command(name="dog")
-async def Dog(ctx):
+@bot.hybrid_command()
+async def dog(ctx: commands.Context):
     response = requests.get("https://dog.ceo/api/breeds/image/random")
     Pic_link = response.json()["message"]
     await ctx.send(Pic_link)
@@ -100,17 +101,15 @@ async def Cat(ctx):
 async def sendAllChannels(message : str):
     if len(channel_list) != 0:
         for channel in channel_list:
-            await bot.get_channel(channel).send(message)
+            channel = bot.get_channel(int(channel))
+            if isinstance(channel, discord.TextChannel):
+                await channel.send(message)
 
-@bot.command(name="test")
-async def send(ctx):
-    await sendAllChannels('qwerty')
-
-@bot.command(name="start")
+@bot.hybrid_command(name="start", description="start sending scores in this chat")
 async def plus(ctx):
     addNewChannel(ctx.channel.id)
 
-@bot.command(name="stop")
+@bot.hybrid_command(name="stop", description="stop sending scores in this chat")
 async def minus(ctx):
     removeChannel(ctx.channel.id)
 
@@ -141,34 +140,49 @@ def removeChannel(channelID):
                 channel_list.remove(int(line))
         f.close()
 
-
-
-
 @bot.event
 async def on_ready():
+    await bot.tree.sync()
     init()
     print("Бот готов!")
-    string = 'Я включился, встречайте!'
-    #string = string + 'Я включился, встречайте! ' + 'https://cdn.discordapp.com/emojis/1139812673454886942.gif?size=48&name=hi&quality=lossless';
-    
-    #await sendAllChannels(string)
-    #await sendAllChannels('https://cdn.discordapp.com/emojis/1139812673454886942.gif?size=48&name=hi&quality=lossless')
     await start()
 
-@bot.command(name="ping")
+@bot.hybrid_command(name="ping")
 async def ping1(ctx):
     print(ctx.channel.id)
     #await Guild.get_channel('1201434939267227690')
     await ctx.send('pong')
 
-@bot.command()
-async def add(ctx,arg):
-    string : str
-    user : str
+@bot.hybrid_command(description="начать отслеживать скоры игрока")
+@discord.app_commands.describe(username="юзернейм в осу")
+async def add(ctx: commands.Context, username: str):
+    msg : str
+    user : ossapi.User
     try:
-        user = api.user(arg)
+        user = api.user(username)
     except:
-        string = str(arg) + " не найден"
+        print(str(username) + " не найден")
+        return False
+    
+    isNew = addNewUser(user.id)
+    if(isNew):
+        addToFile(user.id)
+        msg = str(user.username) + " добавлен"
+    else:
+        msg = str(user.username) + " уже существует в списке"
+
+    print(msg)
+    await ctx.channel.send(msg)
+
+@bot.hybrid_command(description="начать отслеживать скоры игрока по id")
+@discord.app_commands.describe(user_id="id юзера")
+async def addid(ctx, user_id):
+    string : str
+    user : ossapi.User
+    try:
+        user = api.user(user_id)
+    except:
+        string = str(user_id) + " не найден"
         print(string)
         return False
     
@@ -183,53 +197,32 @@ async def add(ctx,arg):
         print(string)
         await ctx.channel.send(string)
 
-@bot.command()
-async def addid(ctx,arg):
-    string : str
-    user : str
-    try:
-        user = api.user(arg)
-    except:
-        string = str(arg) + " не найден"
-        print(string)
-        return False
-    
-    isNew = addNewUser(user.id)
-    if(isNew):
-        addToFile(user.id)
-        string = str(user.username) + " добавлен"
-        print(string)
-        await ctx.channel.send(string)
-    else:
-        string = str(user.username) + " уже существует в списке"
-        print(string)
-        await ctx.channel.send(string)
-
-@bot.command(name="remove")
-async def removePlayer(ctx,arg):
+@bot.hybrid_command(name="remove", description="перестать отслеживать скоры игрока")
+@discord.app_commands.describe(username="юзернейм в осу")
+async def removePlayer(ctx: commands.Context, username: str):
     isHere = False
     with open("playersid.txt", "r") as f:
         lines = f.readlines()
         f.close()
     with open("playersid.txt", "w") as f:
         for line in lines:
-            if line.strip("\n") != str(arg):
+            if line.strip("\n") != str(username):
                 f.write(line)
             else:
                 isHere = True
                 for user in user_list:
                     if user['userid'] == int(line):
                         user_list.remove(user)
-                string = str(api.user(arg).username) + " удален"
+                string = str(api.user(username).username) + " удален"
                 print(string)
                 await ctx.channel.send(string)
         if not isHere:
-            string = str(api.user(arg).username) + " не найден в списке"
+            string = str(api.user(username).username) + " не найден в списке"
             print(string)
             await ctx.channel.send(string)
         f.close()
 
-@bot.command()
+@bot.hybrid_command(description="отслеживаемые игроки")
 async def players(ctx):
     file = open("playersid.txt", "r")
     string = ''
@@ -249,15 +242,21 @@ async def players(ctx):
     await ctx.channel.send(string)
     file.close()
 
+@bot.hybrid_command(description="кролик")
+async def rabbit(ctx: commands.Context):
+    await ctx.send(random.choice(list(open('rabbits.txt'))))
+
 @bot.event
 async def on_resumed():
    pass
 
-@bot.command(name="rs")
-async def resentScore(ctx,arg):
-    u_id = 0
+@bot.hybrid_command(name="rs", description="последний скор игрока")
+@discord.app_commands.describe(username="юзернейм в осу")
+# TODO: юзернейм сделать typing.Optional[str], когда будет возможность сохранять id дискорда
+async def resentScore(ctx: commands.Context, username: str):
+    u_id:ossapi.User
     try:
-        u_id = api.user(arg)
+        u_id = api.user(username)
     except:
         print('Нет такого юзера')
         return
@@ -271,14 +270,19 @@ async def resentScore(ctx,arg):
         weightpp= str(score.weight.pp)
         pp = str(round(score.weight.pp/(score.weight.percentage/100),2))
 
-    if score.rank == 'Grade.F':
-        score.rank = 'Grade.D'
+    if score.rank == Grade.F:
+        score.rank = Grade.D
 
-    strResult = "Игрок " + str(score._user.username)+" получил "+pp+"pp "+"на карте "+score.beatmapset.title+" от "+score.beatmapset.artist+" Дифа: "+score.beatmap.version+" с точностью "+str(round(score.accuracy*100,2))+"%. Моды:"+mod.ModCombination.short_name(score.mods)+". Взвешено: " + weightpp + "pp.";
-    strImage = makeScoreImage(str(score.beatmap.id),str(score._user.username),str(score.created_at.date()) + " " + str(score.created_at.time()),str(score.mods.value),score.score,score.max_combo,str(score.rank).replace('Grade.',''),str(score.statistics.count_50),str(score.statistics.count_100),str(score.statistics.count_300),str(score.statistics.count_miss),str(score.statistics.count_katu),str(score.statistics.count_geki),pp)
-
-    await sendAllChannels(strResult)
-    await sendAllChannels(strImage)
+    if score.beatmapset is ossapi.BeatmapsetCompact and score.beatmap is ossapi.Beatmap:
+        strResult= "Игрок " + score.user().username+" получил "+pp+"pp "+"на карте "+score.beatmapset.title+" от "+score.beatmapset.artist+" Дифа: "+score.beatmap.version+" с точностью "+str(round(score.accuracy*100,2))+"%. Моды:"+mod.ModCombination.short_name(score.mods)+". Взвешено: " + weightpp + "pp.";
+        strImage = makeScoreImage(str(score.beatmap.id),str(score.user().username),str(score.created_at.date()) + " " + str(score.created_at.time()),str(score.mods.value),score.score,score.max_combo,str(score.rank).replace('Grade.',''),str(score.statistics.count_50),str(score.statistics.count_100),str(score.statistics.count_300),str(score.statistics.count_miss),str(score.statistics.count_katu),str(score.statistics.count_geki),pp)
+        embed = discord.Embed(
+            title="score",
+            color=discord.Color.random(),
+            description=strResult
+        )
+        embed.set_image(url=strImage)
+        await ctx.send(embed=embed)
 
 async def start():
     user_iterator = 0
@@ -289,11 +293,6 @@ async def start():
             user_iterator = 0
         await asyncio.sleep(2)
         
-
-@bot.command(name="error")
-async def error(ctx):
-  os.system("main.py")
-
 
 async def startIteration(user_iterator):
     try:
@@ -312,17 +311,15 @@ async def startIteration(user_iterator):
         for score in my_score_list:
             if(score.id != user_list[user_iterator]['last_list'][i].id):
                 print(score)
-                #await ctx.channel.send(score)
-                strResult = "Игрок " + str(score._user.username)+" получил "+str(round(score.weight.pp/(score.weight.percentage/100),2))+"pp "+"на карте "+score.beatmapset.title+" от "+score.beatmapset.artist+" Дифа: "+score.beatmap.version+" с точностью "+str(round(score.accuracy*100,2))+"%. Моды:"+mod.ModCombination.short_name(score.mods)+ ". Это его топ "+str(i+1)+" скор!"+"Взвешено: " + str(round(score.weight.pp,2)) + "pp.";
-                strImage = makeScoreImage(str(score.beatmap.id),str(score._user.username),str(score.created_at.date()) + " " + str(score.created_at.time()),str(score.mods.value),score.score,score.max_combo,str(score.rank).replace('Grade.',''),str(score.statistics.count_50),str(score.statistics.count_100),str(score.statistics.count_300),str(score.statistics.count_miss),str(score.statistics.count_katu),str(score.statistics.count_geki),str(round(score.weight.pp/(score.weight.percentage/100),2)))
-                #await ctx.channel.send(strResult)
-                user_list[user_iterator]['last_list'] = my_score_list
-                isNewScore = True
-                await sendAllChannels(strResult)
-                await sendAllChannels(strImage)
+                if score.weight is ossapi.Weight and score.beatmapset is ossapi.BeatmapsetCompact and score.beatmap is ossapi.Beatmap:
+                    strResult = "Игрок " + score.user().username+" получил "+str(round(score.weight.pp/(score.weight.percentage/100),2))+"pp на карте "+score.beatmapset.title+" от "+score.beatmapset.artist+" Дифа: "+score.beatmap.version+" с точностью "+str(round(score.accuracy*100,2))+"%. Моды:"+mod.ModCombination.short_name(score.mods)+ ". Это его топ "+str(i+1)+" скор!"+"Взвешено: " + str(round(score.weight.pp,2)) + "pp.";
+                    strImage = makeScoreImage(str(score.beatmap.id),str(score.user().username),str(score.created_at.date()) + " " + str(score.created_at.time()),str(score.mods.value),score.score,score.max_combo,str(score.rank).replace('Grade.',''),str(score.statistics.count_50),str(score.statistics.count_100),str(score.statistics.count_300),str(score.statistics.count_miss),str(score.statistics.count_katu),str(score.statistics.count_geki),str(round(score.weight.pp/(score.weight.percentage/100),2)))
+                    user_list[user_iterator]['last_list'] = my_score_list
+                    isNewScore = True
+                    await sendAllChannels(strResult)
+                    await sendAllChannels(strImage)
                 break
             i += 1
-        print(isNewScore)
     
 
 
